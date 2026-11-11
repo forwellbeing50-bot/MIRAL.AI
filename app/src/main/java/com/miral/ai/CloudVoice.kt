@@ -18,16 +18,19 @@ object CloudVoice {
 
     /** Urdu text ki mp3 awaaz laata hai. onDone(file, error) main thread par aata hai. */
     fun fetch(context: Context, text: String, onDone: (File?, String?) -> Unit) {
-        val base = MiralSettings.workerUrl.trim().trimEnd('/')
-        val secret = MiralSettings.appSecret.trim()
+        val base = MiralSettings.cleanUrl(MiralSettings.workerUrl).trimEnd('/')
+        val secret = MiralSettings.cleanHeaderValue(MiralSettings.appSecret)
         val cacheDir = context.applicationContext.cacheDir
         val payload = JSONObject().put("text", text).toString()
 
         executor.execute {
             var file: File? = null
             var error: String? = null
+            var conn: HttpURLConnection? = null
             try {
-                val conn = URL("$base/tts").openConnection() as HttpURLConnection
+                require(secret.isNotBlank()) { "App Secret missing" }
+
+                conn = URL("$base/tts").openConnection() as HttpURLConnection
                 conn.requestMethod = "POST"
                 conn.connectTimeout = 15000
                 conn.readTimeout = 30000
@@ -45,11 +48,18 @@ object CloudVoice {
                     file = out
                 } else {
                     val body = conn.errorStream?.bufferedReader()?.use { it.readText() } ?: ""
-                    error = "code $code ${body.take(120)}"
+                    error = when (code) {
+                        401, 403 -> "Voice: secret match nahi hua (code $code)"
+                        500 -> "Voice: Worker ke andar masla (code 500) ${body.take(120)}"
+                        else -> "Voice: code $code ${body.take(120)}"
+                    }
                 }
-                conn.disconnect()
+            } catch (e: IllegalArgumentException) {
+                error = "Voice: Header masla: ${e.message ?: "Unknown"}"
             } catch (e: Exception) {
-                error = e.message ?: "network"
+                error = "Voice: ${e.message ?: "network"}"
+            } finally {
+                conn?.disconnect()
             }
             main.post { onDone(file, error) }
         }
