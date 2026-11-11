@@ -29,7 +29,10 @@ fun ask(
     onDone: (Reply?, String?) -> Unit
 ) {
     val base = MiralSettings.workerUrl.trim().trimEnd('/')
-    val secret = MiralSettings.appSecret.trim()
+    val secret = MiralSettings.appSecret
+    .trim()
+    .replace("\r", "")
+    .replace("\n", "")
     val payload = buildPayload(history, MiralSettings.flirtLevel)
 
     executor.execute {
