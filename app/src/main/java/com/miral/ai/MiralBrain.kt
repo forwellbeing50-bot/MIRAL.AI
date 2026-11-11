@@ -20,8 +20,11 @@ private val main = Handler(Looper.getMainLooper())
 
 fun isConfigured(): Boolean {
     val url = MiralSettings.workerUrl.trim()
+    val secret = MiralSettings.appSecret.trim()
+
     return url.startsWith("https://") &&
-        MiralSettings.appSecret.isNotBlank()
+        secret.isNotBlank() &&
+        secret.none { it.isISOControl() }
 }
 
 fun ask(
@@ -29,10 +32,7 @@ fun ask(
     onDone: (Reply?, String?) -> Unit
 ) {
     val base = MiralSettings.workerUrl.trim().trimEnd('/')
-    val secret = MiralSettings.appSecret
-    .trim()
-    .replace("\r", "")
-    .replace("\n", "")
+    val secret = MiralSettings.appSecret.trim()
     val payload = buildPayload(history, MiralSettings.flirtLevel)
 
     executor.execute {
@@ -42,9 +42,16 @@ fun ask(
         var conn: HttpURLConnection? = null
 
         try {
-            val url = URL("$base/chat")
+            require(secret.isNotBlank()) {
+                "App Secret missing"
+            }
 
-            conn = url.openConnection() as HttpURLConnection
+            require(secret.none { it.isISOControl() }) {
+                "App Secret contains invalid characters"
+            }
+
+            conn = URL("$base/chat")
+                .openConnection() as HttpURLConnection
 
             conn.requestMethod = "POST"
             conn.connectTimeout = 20000
@@ -89,7 +96,7 @@ fun ask(
                 val roman = obj.optString("roman", "")
 
                 if (urdu.isBlank() && roman.isBlank()) {
-                    error = "Server ne khali jawab bheja: ${response.take(300)}"
+                    error = "Khali jawab: ${response.take(300)}"
                 } else {
                     reply = Reply(
                         roman.ifBlank { urdu },
@@ -102,15 +109,12 @@ fun ask(
             }
 
         } catch (e: SocketTimeoutException) {
-
-            error = "Server timeout: Worker ne waqt par jawab nahi diya"
+            error = "Server timeout"
 
         } catch (e: UnknownHostException) {
-
             error = "Internet/DNS masla: Worker host nahi mila"
 
         } catch (e: Exception) {
-
             error = "Connection masla: ${e.message ?: "Unknown error"}"
 
         } finally {
