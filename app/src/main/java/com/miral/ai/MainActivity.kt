@@ -1,9 +1,21 @@
 package com.miral.ai
 
+import android.Manifest
+import android.content.pm.PackageManager
 import android.os.Bundle
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.BackHandler
+import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -11,22 +23,27 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Button
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.TextField
 import androidx.compose.material3.TextFieldDefaults
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
@@ -35,10 +52,15 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.scale
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.core.content.ContextCompat
 import androidx.core.view.WindowCompat
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -50,7 +72,7 @@ class MainActivity : ComponentActivity() {
         WindowCompat.setDecorFitsSystemWindows(window, false)
         setContent {
             MaterialTheme(colorScheme = darkColorScheme()) {
-                ChatScreen()
+                MiralApp()
             }
         }
     }
@@ -58,40 +80,139 @@ class MainActivity : ComponentActivity() {
 
 data class ChatMessage(val text: String, val fromMiral: Boolean)
 
-fun miralReply(input: String): String {
+data class Reply(val roman: String, val urdu: String)
+
+fun miralReply(input: String): Reply {
     val t = input.trim().lowercase()
     return when {
-        t.contains("salam") || t.contains("assalam") ->
-            "Walaikum Assalam! Kaisi hain aap?"
+        t.contains("salam") || t.contains("assalam") || t.contains("سلام") ->
+            Reply(
+                "Walaikum Assalam! Aap ka kya haal hai?",
+                "وعلیکم السلام! آپ کا کیا حال ہے؟"
+            )
 
-        t.contains("time") || t.contains("waqt") || t.contains("baje") -> {
+        t.contains("time") || t.contains("waqt") || t.contains("baje") || t.contains("وقت") -> {
             val now = SimpleDateFormat("hh:mm a", Locale.getDefault()).format(Date())
-            "Abhi waqt hai $now."
+            Reply("Abhi waqt hai $now.", "ابھی وقت ہے $now۔")
         }
 
-        t.contains("date") || t.contains("tareekh") || t.contains("tarikh") -> {
+        t.contains("date") || t.contains("tareekh") || t.contains("tarikh") || t.contains("تاریخ") -> {
             val today = SimpleDateFormat("EEEE, dd MMMM yyyy", Locale.getDefault()).format(Date())
-            "Aaj ki tareekh hai $today."
+            Reply("Aaj ki tareekh hai $today.", "آج کی تاریخ ہے $today۔")
         }
 
-        t.contains("naam") || t.contains("name") ->
-            "Mera naam Miral hai. Main aap ki Urdu AI dost hoon."
+        t.contains("naam") || t.contains("name") || t.contains("نام") ->
+            Reply(
+                "Mera naam Miral hai. Main aap ki Urdu AI dost hoon.",
+                "میرا نام میرل ہے۔ میں آپ کی اردو اے آئی دوست ہوں۔"
+            )
 
-        t.contains("kaise") || t.contains("kaisi") || t.contains("how are") ->
-            "Main bilkul theek hoon, shukriya! Aap sunayein."
+        t.contains("kaise") || t.contains("kaisi") || t.contains("how are") ||
+            t.contains("کیسے") || t.contains("کیسی") || t.contains("حال") ->
+            Reply(
+                "Main bilkul theek hoon, shukriya! Aap sunayein.",
+                "میں بالکل ٹھیک ہوں، شکریہ! آپ سنائیں۔"
+            )
 
         else ->
-            "Abhi main seekh rahi hoon. Jald hi mere paas asli AI dimagh hoga. Tab tak salam, waqt ya tareekh poochh kar dekhein."
+            Reply(
+                "Abhi main seekh rahi hoon. Jald hi mere paas asli AI dimagh hoga. Tab tak salam, waqt ya tareekh poochh kar dekhein.",
+                "ابھی میں سیکھ رہی ہوں۔ جلد ہی میرے پاس اصل اے آئی دماغ ہوگا۔ تب تک سلام، وقت یا تاریخ پوچھ کر دیکھیں۔"
+            )
     }
 }
 
+enum class Screen { CHAT, VOICE }
+
 @Composable
-fun ChatScreen() {
+fun MiralApp() {
+    val ctx = LocalContext.current.applicationContext
+    val voice = remember { VoiceManager(ctx) }
+    DisposableEffect(Unit) {
+        onDispose { voice.shutdown() }
+    }
+
     val messages = remember {
         mutableStateListOf(
             ChatMessage("Assalam o Alaikum! Main Miral hoon. Mujh se kuch bhi poochein.", true)
         )
     }
+    var screen by remember { mutableStateOf(Screen.CHAT) }
+    var lastHeard by remember { mutableStateOf("") }
+    var lastReply by remember { mutableStateOf("") }
+
+    fun handleText(text: String, speakReply: Boolean) {
+        val clean = text.trim()
+        if (clean.isEmpty()) return
+        val reply = miralReply(clean)
+        messages.add(ChatMessage(clean, false))
+        messages.add(ChatMessage(reply.roman, true))
+        lastReply = reply.roman
+        if (speakReply) voice.speak(reply.roman, reply.urdu)
+    }
+
+    fun startVoice() {
+        voice.startListening { heard ->
+            lastHeard = heard
+            handleText(heard, true)
+        }
+    }
+
+    val permissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        if (granted) {
+            startVoice()
+        } else {
+            voice.statusText = "Mic ki ijazat nahi mili. Phone Settings > Apps > MIRAL AI > Permissions"
+        }
+    }
+
+    fun onMicClick() {
+        if (voice.isListening) {
+            voice.stopListening()
+            return
+        }
+        val granted = ContextCompat.checkSelfPermission(
+            ctx, Manifest.permission.RECORD_AUDIO
+        ) == PackageManager.PERMISSION_GRANTED
+        if (granted) {
+            startVoice()
+        } else {
+            permissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+        }
+    }
+
+    if (screen == Screen.VOICE) {
+        BackHandler {
+            voice.stopSpeaking()
+            screen = Screen.CHAT
+        }
+        VoiceScreen(
+            voice = voice,
+            lastHeard = lastHeard,
+            lastReply = lastReply,
+            onMicClick = { onMicClick() },
+            onBack = {
+                voice.stopSpeaking()
+                screen = Screen.CHAT
+            }
+        )
+    } else {
+        ChatScreen(
+            messages = messages,
+            onSend = { handleText(it, false) },
+            onOpenVoice = { screen = Screen.VOICE }
+        )
+    }
+}
+
+@Composable
+fun ChatScreen(
+    messages: List<ChatMessage>,
+    onSend: (String) -> Unit,
+    onOpenVoice: () -> Unit
+) {
     var input by remember { mutableStateOf("") }
     val listState = rememberLazyListState()
 
@@ -99,14 +220,6 @@ fun ChatScreen() {
         if (messages.isNotEmpty()) {
             listState.animateScrollToItem(messages.size - 1)
         }
-    }
-
-    fun send() {
-        val text = input.trim()
-        if (text.isEmpty()) return
-        messages.add(ChatMessage(text, false))
-        messages.add(ChatMessage(miralReply(text), true))
-        input = ""
     }
 
     Column(
@@ -117,13 +230,23 @@ fun ChatScreen() {
             .navigationBarsPadding()
             .imePadding()
     ) {
-        Text(
-            text = "MIRAL AI",
-            color = Color(0xFFB388FF),
-            fontSize = 24.sp,
-            fontWeight = FontWeight.Bold,
-            modifier = Modifier.padding(16.dp)
-        )
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp, vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween
+        ) {
+            Text(
+                text = "MIRAL AI",
+                color = Color(0xFFB388FF),
+                fontSize = 24.sp,
+                fontWeight = FontWeight.Bold
+            )
+            TextButton(onClick = onOpenVoice) {
+                Text("Awaaz 🎙", color = Color(0xFFE040FB), fontSize = 16.sp)
+            }
+        }
 
         LazyColumn(
             state = listState,
@@ -156,7 +279,10 @@ fun ChatScreen() {
                 )
             )
             Spacer(modifier = Modifier.padding(horizontal = 4.dp))
-            Button(onClick = { send() }) {
+            Button(onClick = {
+                onSend(input)
+                input = ""
+            }) {
                 Text("Bhejein")
             }
         }
@@ -183,6 +309,105 @@ fun MessageBubble(message: ChatMessage) {
                 color = Color.White,
                 fontSize = 16.sp
             )
+        }
+    }
+}
+
+@Composable
+fun VoiceScreen(
+    voice: VoiceManager,
+    lastHeard: String,
+    lastReply: String,
+    onMicClick: () -> Unit,
+    onBack: () -> Unit
+) {
+    val active = voice.isListening || voice.isSpeaking
+    val transition = rememberInfiniteTransition(label = "pulse")
+    val pulse by transition.animateFloat(
+        initialValue = 1f,
+        targetValue = 1.2f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(durationMillis = 800, easing = FastOutSlowInEasing),
+            repeatMode = RepeatMode.Reverse
+        ),
+        label = "pulseScale"
+    )
+    val scale = if (active) pulse else 1f
+    val circleColor = when {
+        voice.isListening -> Color(0xFFE040FB)
+        voice.isSpeaking -> Color(0xFF7C4DFF)
+        else -> Color(0xFF3B2A70)
+    }
+
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(Color(0xFF0B0B14))
+            .statusBarsPadding()
+            .navigationBarsPadding()
+            .padding(16.dp)
+    ) {
+        TextButton(onClick = onBack) {
+            Text("← Chat par wapas", color = Color(0xFFB388FF), fontSize = 16.sp)
+        }
+
+        Column(
+            modifier = Modifier
+                .weight(1f)
+                .fillMaxWidth(),
+            verticalArrangement = Arrangement.Center,
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
+            Box(
+                modifier = Modifier
+                    .size(160.dp)
+                    .scale(scale)
+                    .clip(CircleShape)
+                    .background(circleColor)
+                    .clickable { onMicClick() },
+                contentAlignment = Alignment.Center
+            ) {
+                Text("🎤", fontSize = 56.sp)
+            }
+
+            Spacer(modifier = Modifier.height(40.dp))
+
+            Text(
+                text = voice.statusText,
+                color = Color.White,
+                fontSize = 20.sp,
+                textAlign = TextAlign.Center
+            )
+
+            if (lastHeard.isNotEmpty()) {
+                Spacer(modifier = Modifier.height(20.dp))
+                Text(
+                    text = "Aap ne kaha: $lastHeard",
+                    color = Color(0xFFBDBDBD),
+                    fontSize = 16.sp,
+                    textAlign = TextAlign.Center
+                )
+            }
+
+            if (lastReply.isNotEmpty()) {
+                Spacer(modifier = Modifier.height(12.dp))
+                Text(
+                    text = "Miral: $lastReply",
+                    color = Color(0xFFB388FF),
+                    fontSize = 16.sp,
+                    textAlign = TextAlign.Center
+                )
+            }
+
+            if (voice.voiceNote.isNotEmpty()) {
+                Spacer(modifier = Modifier.height(24.dp))
+                Text(
+                    text = voice.voiceNote,
+                    color = Color(0xFFFFB74D),
+                    fontSize = 13.sp,
+                    textAlign = TextAlign.Center
+                )
+            }
         }
     }
 }
