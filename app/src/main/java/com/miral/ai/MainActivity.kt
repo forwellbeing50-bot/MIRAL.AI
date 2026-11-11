@@ -56,6 +56,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.scale
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
@@ -67,14 +68,28 @@ import java.util.Date
 import java.util.Locale
 
 class MainActivity : ComponentActivity() {
+
+    private lateinit var voice: VoiceManager
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         WindowCompat.setDecorFitsSystemWindows(window, false)
+        voice = VoiceManager(applicationContext)
         setContent {
             MaterialTheme(colorScheme = darkColorScheme()) {
-                MiralApp()
+                MiralApp(voice)
             }
         }
+    }
+
+    override fun onStop() {
+        super.onStop()
+        voice.stopConversation()
+    }
+
+    override fun onDestroy() {
+        super.onDestroy()
+        voice.shutdown()
     }
 }
 
@@ -125,12 +140,8 @@ fun miralReply(input: String): Reply {
 enum class Screen { CHAT, VOICE }
 
 @Composable
-fun MiralApp() {
-    val ctx = LocalContext.current.applicationContext
-    val voice = remember { VoiceManager(ctx) }
-    DisposableEffect(Unit) {
-        onDispose { voice.shutdown() }
-    }
+fun MiralApp(voice: VoiceManager) {
+    val ctx = LocalContext.current
 
     val messages = remember {
         mutableStateListOf(
@@ -152,7 +163,7 @@ fun MiralApp() {
     }
 
     fun startVoice() {
-        voice.startListening { heard ->
+        voice.startConversation { heard ->
             lastHeard = heard
             handleText(heard, true)
         }
@@ -169,8 +180,8 @@ fun MiralApp() {
     }
 
     fun onMicClick() {
-        if (voice.isListening) {
-            voice.stopListening()
+        if (voice.conversationMode || voice.isListening || voice.isSpeaking) {
+            voice.stopConversation()
             return
         }
         val granted = ContextCompat.checkSelfPermission(
@@ -185,7 +196,7 @@ fun MiralApp() {
 
     if (screen == Screen.VOICE) {
         BackHandler {
-            voice.stopSpeaking()
+            voice.stopConversation()
             screen = Screen.CHAT
         }
         VoiceScreen(
@@ -194,7 +205,7 @@ fun MiralApp() {
             lastReply = lastReply,
             onMicClick = { onMicClick() },
             onBack = {
-                voice.stopSpeaking()
+                voice.stopConversation()
                 screen = Screen.CHAT
             }
         )
@@ -321,6 +332,12 @@ fun VoiceScreen(
     onMicClick: () -> Unit,
     onBack: () -> Unit
 ) {
+    val view = LocalView.current
+    DisposableEffect(Unit) {
+        view.keepScreenOn = true
+        onDispose { view.keepScreenOn = false }
+    }
+
     val active = voice.isListening || voice.isSpeaking
     val transition = rememberInfiniteTransition(label = "pulse")
     val pulse by transition.animateFloat(
@@ -376,6 +393,19 @@ fun VoiceScreen(
                 text = voice.statusText,
                 color = Color.White,
                 fontSize = 20.sp,
+                textAlign = TextAlign.Center
+            )
+
+            Spacer(modifier = Modifier.height(8.dp))
+
+            Text(
+                text = if (voice.conversationMode) {
+                    "Baat-cheet ON ✓  Rokne ke liye mic dabayein"
+                } else {
+                    "Ek baar mic dabayein, phir baat-cheet khud chalti rahegi"
+                },
+                color = if (voice.conversationMode) Color(0xFF69F0AE) else Color(0xFF9E9E9E),
+                fontSize = 14.sp,
                 textAlign = TextAlign.Center
             )
 
