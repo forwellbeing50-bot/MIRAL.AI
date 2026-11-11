@@ -19,11 +19,14 @@ class VoiceManager(private val context: Context) {
 
     var isListening by mutableStateOf(false)
     var isSpeaking by mutableStateOf(false)
+    var conversationMode by mutableStateOf(false)
     var statusText by mutableStateOf("Mic dabayein aur bolein")
     var voiceNote by mutableStateOf("")
 
     private val mainHandler = Handler(Looper.getMainLooper())
     private val idleText = "Mic dabayein aur bolein"
+    private val maxSilentRounds = 3
+    private var silentRounds = 0
 
     private var recognizer: SpeechRecognizer? = null
     private var tts: TextToSpeech? = null
@@ -72,26 +75,46 @@ class VoiceManager(private val context: Context) {
             }
 
             override fun onDone(utteranceId: String?) {
-                mainHandler.post {
-                    isSpeaking = false
-                    statusText = idleText
-                }
+                mainHandler.post { finishedSpeaking() }
             }
 
             @Deprecated("Deprecated in Java")
             override fun onError(utteranceId: String?) {
-                mainHandler.post {
-                    isSpeaking = false
-                    statusText = idleText
-                }
+                mainHandler.post { finishedSpeaking() }
             }
         })
     }
 
+    private fun finishedSpeaking() {
+        isSpeaking = false
+        if (conversationMode) {
+            statusText = "Main sun rahi hoon..."
+            scheduleRestart(500)
+        } else {
+            statusText = idleText
+        }
+    }
+
+    private fun scheduleRestart(delayMs: Long) {
+        mainHandler.postDelayed({ restartListening() }, delayMs)
+    }
+
+    private fun restartListening() {
+        if (conversationMode && !isListening && !isSpeaking) {
+            val callback = onResult ?: return
+            startListening(callback)
+        }
+    }
+
     fun speak(roman: String, urdu: String) {
-        val engine = tts ?: return
-        if (!ttsReady) return
+        val engine = tts
+        if (engine == null || !ttsReady) {
+            if (conversationMode) scheduleRestart(500)
+            return
+        }
         val text = if (urduVoiceFound) urdu else roman
+        isSpeaking = true
+        statusText = "Main bol rahi hoon..."
         engine.speak(text, TextToSpeech.QUEUE_FLUSH, null, "miral_utterance")
     }
 
@@ -100,8 +123,27 @@ class VoiceManager(private val context: Context) {
         isSpeaking = false
     }
 
+    /** Ek baar mic dabane par baat-cheet mode shuru. */
+    fun startConversation(onResult: (String) -> Unit) {
+        conversationMode = true
+        silentRounds = 0
+        startListening(onResult)
+    }
+
+    /** Baat-cheet mode rokta hai: sunna aur bolna dono band. */
+    fun stopConversation() {
+        conversationMode = false
+        silentRounds = 0
+        mainHandler.removeCallbacksAndMessages(null)
+        recognizer?.cancel()
+        isListening = false
+        stopSpeaking()
+        statusText = idleText
+    }
+
     fun startListening(onResult: (String) -> Unit) {
         if (!SpeechRecognizer.isRecognitionAvailable(context)) {
+            conversationMode = false
             statusText = "Is phone par voice recognition maujood nahi (Google app chahiye)"
             return
         }
@@ -126,16 +168,35 @@ class VoiceManager(private val context: Context) {
 
                 override fun onError(error: Int) {
                     isListening = false
-                    statusText = when (error) {
+                    if (!conversationMode && error == SpeechRecognizer.ERROR_CLIENT) return
+                    when (error) {
                         SpeechRecognizer.ERROR_NO_MATCH,
-                        SpeechRecognizer.ERROR_SPEECH_TIMEOUT ->
-                            "Kuch sunai nahi diya. Mic dabake dobara bolein"
-                        SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS ->
-                            "Mic ki ijazat chahiye. Phone Settings > Apps > MIRAL AI > Permissions"
-                        SpeechRecognizer.ERROR_NETWORK,
-                        SpeechRecognizer.ERROR_NETWORK_TIMEOUT ->
-                            "Internet ka masla hai. Check karke dobara koshish karein"
-                        else -> "Voice mein masla aaya (code $error). Dobara koshish karein"
+                        SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> {
+                            if (conversationMode) {
+                                silentRounds++
+                                if (silentRounds >= maxSilentRounds) {
+                                    conversationMode = false
+                                    statusText = "Kuch sunai nahi diya, is liye ruk gayi. Mic dabake dobara shuru karein"
+                                } else {
+                                    statusText = "Main intezar kar rahi hoon..."
+                                    scheduleRestart(800)
+                                }
+                            } else {
+                                statusText = "Kuch sunai nahi diya. Mic dabake dobara bolein"
+                            }
+                        }
+
+                        else -> {
+                            conversationMode = false
+                            statusText = when (error) {
+                                SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS ->
+                                    "Mic ki ijazat chahiye. Phone Settings > Apps > MIRAL AI > Permissions"
+                                SpeechRecognizer.ERROR_NETWORK,
+                                SpeechRecognizer.ERROR_NETWORK_TIMEOUT ->
+                                    "Internet ka masla hai. Check karke dobara koshish karein"
+                                else -> "Voice mein masla aaya (code $error). Dobara koshish karein"
+                            }
+                        }
                     }
                 }
 
@@ -145,9 +206,20 @@ class VoiceManager(private val context: Context) {
                         ?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
                         ?.firstOrNull()
                     if (text.isNullOrBlank()) {
-                        statusText = "Samajh nahi aaya. Dobara bolein"
+                        if (conversationMode) {
+                            silentRounds++
+                            if (silentRounds >= maxSilentRounds) {
+                                conversationMode = false
+                                statusText = "Kuch sunai nahi diya, is liye ruk gayi. Mic dabake dobara shuru karein"
+                            } else {
+                                scheduleRestart(800)
+                            }
+                        } else {
+                            statusText = "Samajh nahi aaya. Dobara bolein"
+                        }
                     } else {
-                        statusText = idleText
+                        silentRounds = 0
+                        statusText = if (conversationMode) "Soch rahi hoon..." else idleText
                         this@VoiceManager.onResult?.invoke(text)
                     }
                 }
@@ -171,10 +243,12 @@ class VoiceManager(private val context: Context) {
     }
 
     fun stopListening() {
-        recognizer?.stopListening()
+        stopConversation()
     }
 
     fun shutdown() {
+        conversationMode = false
+        mainHandler.removeCallbacksAndMessages(null)
         recognizer?.destroy()
         recognizer = null
         tts?.stop()
