@@ -2,6 +2,7 @@ package com.miral.ai
 
 import android.Manifest
 import android.content.pm.PackageManager
+import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
@@ -33,10 +34,14 @@ import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TextField
@@ -46,7 +51,6 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -69,12 +73,10 @@ import java.util.Locale
 
 class MainActivity : ComponentActivity() {
 
-    private lateinit var voice: VoiceManager
-
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         WindowCompat.setDecorFitsSystemWindows(window, false)
-        voice = VoiceManager(applicationContext)
+        val voice = MiralHub.voice(applicationContext)
         setContent {
             MaterialTheme(colorScheme = darkColorScheme()) {
                 MiralApp(voice)
@@ -84,12 +86,16 @@ class MainActivity : ComponentActivity() {
 
     override fun onStop() {
         super.onStop()
-        voice.stopConversation()
+        if (!MiralHub.backgroundRunning) {
+            MiralHub.peekVoice()?.stopConversation()
+        }
     }
 
     override fun onDestroy() {
         super.onDestroy()
-        voice.shutdown()
+        if (!MiralHub.backgroundRunning) {
+            MiralHub.releaseVoice()
+        }
     }
 }
 
@@ -97,6 +103,7 @@ data class ChatMessage(val text: String, val fromMiral: Boolean)
 
 data class Reply(val roman: String, val urdu: String)
 
+/** Sirf tab kaam aata hai jab brain se rabta na ho (offline jawab). */
 fun miralReply(input: String): Reply {
     val t = input.trim().lowercase()
     return when {
@@ -137,39 +144,30 @@ fun miralReply(input: String): Reply {
     }
 }
 
-enum class Screen { CHAT, VOICE }
+enum class Screen { CHAT, VOICE, SETTINGS }
 
 @Composable
 fun MiralApp(voice: VoiceManager) {
     val ctx = LocalContext.current
-
-    val messages = remember {
-        mutableStateListOf(
-            ChatMessage("Assalam o Alaikum! Main Miral hoon. Mujh se kuch bhi poochein.", true)
-        )
-    }
     var screen by remember { mutableStateOf(Screen.CHAT) }
-    var lastHeard by remember { mutableStateOf("") }
-    var lastReply by remember { mutableStateOf("") }
 
-    fun handleText(text: String, speakReply: Boolean) {
-        val clean = text.trim()
-        if (clean.isEmpty()) return
-        val reply = miralReply(clean)
-        messages.add(ChatMessage(clean, false))
-        messages.add(ChatMessage(reply.roman, true))
-        lastReply = reply.roman
-        if (speakReply) voice.speak(reply.roman, reply.urdu)
-    }
+    fun micGranted(): Boolean =
+        ContextCompat.checkSelfPermission(ctx, Manifest.permission.RECORD_AUDIO) ==
+            PackageManager.PERMISSION_GRANTED
 
     fun startVoice() {
         voice.startConversation { heard ->
-            lastHeard = heard
-            handleText(heard, true)
+            MiralHub.lastHeard = heard
+            MiralHub.handleText(heard, true)
         }
     }
 
-    val permissionLauncher = rememberLauncherForActivityResult(
+    fun startBackground() {
+        voice.stopConversation()
+        MiralService.start(ctx)
+    }
+
+    val micLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission()
     ) { granted ->
         if (granted) {
@@ -179,50 +177,98 @@ fun MiralApp(voice: VoiceManager) {
         }
     }
 
+    val backgroundLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestMultiplePermissions()
+    ) { _ ->
+        if (micGranted()) {
+            startBackground()
+        } else {
+            voice.statusText = "Mic ki ijazat nahi mili. Phone Settings > Apps > MIRAL AI > Permissions"
+        }
+    }
+
     fun onMicClick() {
+        if (MiralHub.backgroundRunning) {
+            MiralService.stop(ctx)
+            return
+        }
         if (voice.conversationMode || voice.isListening || voice.isSpeaking) {
             voice.stopConversation()
             return
         }
-        val granted = ContextCompat.checkSelfPermission(
-            ctx, Manifest.permission.RECORD_AUDIO
-        ) == PackageManager.PERMISSION_GRANTED
-        if (granted) {
+        if (micGranted()) {
             startVoice()
         } else {
-            permissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+            micLauncher.launch(Manifest.permission.RECORD_AUDIO)
         }
     }
 
-    if (screen == Screen.VOICE) {
-        BackHandler {
-            voice.stopConversation()
-            screen = Screen.CHAT
+    fun onToggleBackground() {
+        if (MiralHub.backgroundRunning) {
+            MiralService.stop(ctx)
+            return
         }
-        VoiceScreen(
-            voice = voice,
-            lastHeard = lastHeard,
-            lastReply = lastReply,
-            onMicClick = { onMicClick() },
-            onBack = {
-                voice.stopConversation()
+        val needed = mutableListOf<String>()
+        if (!micGranted()) {
+            needed.add(Manifest.permission.RECORD_AUDIO)
+        }
+        if (Build.VERSION.SDK_INT >= 33 &&
+            ContextCompat.checkSelfPermission(ctx, Manifest.permission.POST_NOTIFICATIONS) !=
+            PackageManager.PERMISSION_GRANTED
+        ) {
+            needed.add(Manifest.permission.POST_NOTIFICATIONS)
+        }
+        if (needed.isEmpty()) {
+            startBackground()
+        } else {
+            backgroundLauncher.launch(needed.toTypedArray())
+        }
+    }
+
+    when (screen) {
+        Screen.VOICE -> {
+            BackHandler {
+                if (!MiralHub.backgroundRunning) voice.stopConversation()
                 screen = Screen.CHAT
             }
-        )
-    } else {
-        ChatScreen(
-            messages = messages,
-            onSend = { handleText(it, false) },
-            onOpenVoice = { screen = Screen.VOICE }
-        )
+            VoiceScreen(
+                voice = voice,
+                lastHeard = MiralHub.lastHeard,
+                lastReply = MiralHub.lastReply,
+                backgroundRunning = MiralHub.backgroundRunning,
+                onMicClick = { onMicClick() },
+                onToggleBackground = { onToggleBackground() },
+                onBack = {
+                    if (!MiralHub.backgroundRunning) voice.stopConversation()
+                    screen = Screen.CHAT
+                }
+            )
+        }
+
+        Screen.SETTINGS -> {
+            BackHandler { screen = Screen.CHAT }
+            SettingsScreen(onBack = { screen = Screen.CHAT })
+        }
+
+        Screen.CHAT -> {
+            ChatScreen(
+                messages = MiralHub.messages,
+                thinking = MiralHub.thinking,
+                onSend = { MiralHub.handleText(it, false) },
+                onOpenVoice = { screen = Screen.VOICE },
+                onOpenSettings = { screen = Screen.SETTINGS }
+            )
+        }
     }
 }
 
 @Composable
 fun ChatScreen(
     messages: List<ChatMessage>,
+    thinking: Boolean,
     onSend: (String) -> Unit,
-    onOpenVoice: () -> Unit
+    onOpenVoice: () -> Unit,
+    onOpenSettings: () -> Unit
 ) {
     var input by remember { mutableStateOf("") }
     val listState = rememberLazyListState()
@@ -254,8 +300,13 @@ fun ChatScreen(
                 fontSize = 24.sp,
                 fontWeight = FontWeight.Bold
             )
-            TextButton(onClick = onOpenVoice) {
-                Text("Awaaz 🎙", color = Color(0xFFE040FB), fontSize = 16.sp)
+            Row {
+                TextButton(onClick = onOpenSettings) {
+                    Text("⚙", color = Color(0xFFB388FF), fontSize = 20.sp)
+                }
+                TextButton(onClick = onOpenVoice) {
+                    Text("Awaaz 🎙", color = Color(0xFFE040FB), fontSize = 16.sp)
+                }
             }
         }
 
@@ -270,6 +321,15 @@ fun ChatScreen(
             items(messages) { message ->
                 MessageBubble(message)
             }
+        }
+
+        if (thinking) {
+            Text(
+                text = "Miral soch rahi hai...",
+                color = Color(0xFF9E9E9E),
+                fontSize = 14.sp,
+                modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp)
+            )
         }
 
         Row(
@@ -325,11 +385,126 @@ fun MessageBubble(message: ChatMessage) {
 }
 
 @Composable
+fun SettingsLabel(text: String) {
+    Text(
+        text = text,
+        color = Color(0xFFBDBDBD),
+        fontSize = 14.sp,
+        modifier = Modifier.padding(top = 16.dp, bottom = 6.dp)
+    )
+}
+
+@Composable
+fun FlirtChoice(label: String, value: String, modifier: Modifier) {
+    val selected = MiralSettings.flirtLevel == value
+    Button(
+        onClick = { MiralSettings.updateFlirtLevel(value) },
+        modifier = modifier,
+        colors = ButtonDefaults.buttonColors(
+            containerColor = if (selected) Color(0xFF7C4DFF) else Color(0xFF2B2B3D)
+        )
+    ) {
+        Text(label, fontSize = 12.sp, color = Color.White)
+    }
+}
+
+@Composable
+fun SettingsScreen(onBack: () -> Unit) {
+    var testResult by remember { mutableStateOf("") }
+    var testing by remember { mutableStateOf(false) }
+
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(Color(0xFF0B0B14))
+            .statusBarsPadding()
+            .navigationBarsPadding()
+            .imePadding()
+            .verticalScroll(rememberScrollState())
+            .padding(16.dp)
+    ) {
+        TextButton(onClick = onBack) {
+            Text("← Wapas", color = Color(0xFFB388FF), fontSize = 16.sp)
+        }
+        Text(
+            text = "Settings",
+            color = Color.White,
+            fontSize = 24.sp,
+            fontWeight = FontWeight.Bold
+        )
+
+        SettingsLabel("Worker link (Cloudflare se)")
+        TextField(
+            value = MiralSettings.workerUrl,
+            onValueChange = { MiralSettings.updateWorkerUrl(it) },
+            singleLine = true,
+            modifier = Modifier.fillMaxWidth(),
+            placeholder = { Text("https://miral.xxxx.workers.dev") }
+        )
+
+        SettingsLabel("Secret (wohi jo Worker mein APP_SECRET rakha)")
+        TextField(
+            value = MiralSettings.appSecret,
+            onValueChange = { MiralSettings.updateAppSecret(it) },
+            singleLine = true,
+            modifier = Modifier.fillMaxWidth(),
+            placeholder = { Text("APP_SECRET") }
+        )
+
+        SettingsLabel("Miral ka andaaz")
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            FlirtChoice("Seedha", "off", Modifier.weight(1f))
+            FlirtChoice("Halka flirt", "flirty", Modifier.weight(1f))
+            FlirtChoice("Romantic", "romantic", Modifier.weight(1f))
+        }
+
+        SettingsLabel("Awaaz")
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            Switch(
+                checked = MiralSettings.cloudVoice,
+                onCheckedChange = { MiralSettings.updateCloudVoice(it) }
+            )
+            Text(
+                text = "Realistic cloud awaaz (Azure). Band ho to phone ki awaaz.",
+                color = Color.White,
+                fontSize = 14.sp,
+                modifier = Modifier.weight(1f)
+            )
+        }
+
+        Spacer(modifier = Modifier.height(24.dp))
+        Button(
+            enabled = !testing,
+            onClick = {
+                testing = true
+                testResult = "Test ho raha hai..."
+                MiralBrain.test { result ->
+                    testing = false
+                    testResult = result
+                }
+            }
+        ) {
+            Text("Brain test karein")
+        }
+
+        if (testResult.isNotEmpty()) {
+            Spacer(modifier = Modifier.height(12.dp))
+            Text(text = testResult, color = Color.White, fontSize = 15.sp)
+        }
+    }
+}
+
+@Composable
 fun VoiceScreen(
     voice: VoiceManager,
     lastHeard: String,
     lastReply: String,
+    backgroundRunning: Boolean,
     onMicClick: () -> Unit,
+    onToggleBackground: () -> Unit,
     onBack: () -> Unit
 ) {
     val view = LocalView.current
@@ -399,45 +574,25 @@ fun VoiceScreen(
             Spacer(modifier = Modifier.height(8.dp))
 
             Text(
-                text = if (voice.conversationMode) {
-                    "Baat-cheet ON ✓  Rokne ke liye mic dabayein"
-                } else {
-                    "Ek baar mic dabayein, phir baat-cheet khud chalti rahegi"
+                text = when {
+                    backgroundRunning ->
+                        "Background mode ON ✓  App band ya phone lock ho, 'Miral' bol kar baat karein. Jaise: Miral, waqt kya hai"
+                    voice.conversationMode ->
+                        "Baat-cheet ON ✓  Rokne ke liye mic dabayein"
+                    else ->
+                        "Ek baar mic dabayein, phir baat-cheet khud chalti rahegi"
                 },
-                color = if (voice.conversationMode) Color(0xFF69F0AE) else Color(0xFF9E9E9E),
+                color = if (backgroundRunning || voice.conversationMode) {
+                    Color(0xFF69F0AE)
+                } else {
+                    Color(0xFF9E9E9E)
+                },
                 fontSize = 14.sp,
                 textAlign = TextAlign.Center
             )
 
-            if (lastHeard.isNotEmpty()) {
-                Spacer(modifier = Modifier.height(20.dp))
-                Text(
-                    text = "Aap ne kaha: $lastHeard",
-                    color = Color(0xFFBDBDBD),
-                    fontSize = 16.sp,
-                    textAlign = TextAlign.Center
-                )
-            }
+            Spacer(modifier = Modifier.height(20.dp))
 
-            if (lastReply.isNotEmpty()) {
-                Spacer(modifier = Modifier.height(12.dp))
+            Button(onClick = onToggleBackground) {
                 Text(
-                    text = "Miral: $lastReply",
-                    color = Color(0xFFB388FF),
-                    fontSize = 16.sp,
-                    textAlign = TextAlign.Center
-                )
-            }
-
-            if (voice.voiceNote.isNotEmpty()) {
-                Spacer(modifier = Modifier.height(24.dp))
-                Text(
-                    text = voice.voiceNote,
-                    color = Color(0xFFFFB74D),
-                    fontSize = 13.sp,
-                    textAlign = TextAlign.Center
-                )
-            }
-        }
-    }
-}
+                    if (backgroundRu
