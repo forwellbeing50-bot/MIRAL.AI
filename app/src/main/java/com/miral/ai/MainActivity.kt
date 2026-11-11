@@ -593,6 +593,48 @@ fun VoiceScreen(
 
             Spacer(modifier = Modifier.height(20.dp))
 
-            Button(onClick = onToggleBackground) {
+                        Button(onClick = onToggleBackground) {
                 Text(
-                    if (backgroundRu
+                    if (backgroundRunning) {
+                        "Background mode band karein"
+                    } else {
+                        "Background mode shuru karein"
+                    }
+                )
+            }
+
+            Spacer(modifier = Modifier.height(12.dp))
+
+            Button(
+                onClick = onBack,
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = Color(0xFF3B3B52)
+                )
+            ) {
+                Text("Chat par wapas")
+            }
+
+            Spacer(modifier = Modifier.height(20.dp))
+
+            if (lastHeard.isNotBlank()) {
+                Text(
+                    text = "Aap ne kaha: $lastHeard",
+                    color = Color(0xFFB388FF),
+                    fontSize = 15.sp,
+                    textAlign = TextAlign.Center
+                )
+            }
+
+            Spacer(modifier = Modifier.height(12.dp))
+
+            if (lastReply.isNotBlank()) {
+                Text(
+                    text = "Miral: $lastReply",
+                    color = Color.White,
+                    fontSize = 16.sp,
+                    textAlign = TextAlign.Center
+                )
+            }
+        }
+    }
+}
